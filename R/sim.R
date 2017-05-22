@@ -39,7 +39,7 @@ d <- d %>%
          cinc = c(scale(inc)), 
          cplumb = c(scale(plumb)))
 
-pairs(d[, c("choval", "cinc", "cplumb")])
+pairs(d[, c("choval", "cplumb")])
 
 
 W <- as.matrix(nb2mat(xx, style = "B"))
@@ -63,17 +63,16 @@ columbus_map %>%
   scale_fill_viridis()
 
 # Now put together design matrices for each timestep
-X <- array(dim = c(nrow(d) / Nt, 2, Nt))
+X <- array(dim = c(nrow(d) / Nt, 3, Nt))
 for (i in 1:Nt) {
   X[, , i] <- d %>%
     filter(t == i) %>%
-    model.matrix(~ 1 + cplumb, data = .)
+    model.matrix(~ 1 + cplumb + choval, data = .)
 }
 
 # Make block diagonal adjacency matrix
-A_t <- matrix(0, nrow = nrow(X[, , 1]), ncol = nrow(X[, , 1]))
-A_t[1:nrow(columbus_df), 1:nrow(columbus_df)] <- W
-A_t[(nrow(columbus_df) + 1):nrow(A_t), (nrow(columbus_df) + 1):nrow(A_t)] <- W
+A_t <- bdiag(replicate(L, list(W))) %>%
+  as.matrix
 image(A_t)
 
 # compute multivariate basis functions
@@ -98,7 +97,7 @@ tbl_df(G_unrolled) %>%
   bind_cols(d) %>%
   mutate(id = POLYID) %>%
   right_join(columbus_map) %>%
-  ggplot(aes(x = long, y = lat, group = id, fill = V4)) + 
+  ggplot(aes(x = long, y = lat, group = id, fill = V1)) + 
   geom_polygon() + 
   facet_grid(l ~ t) + 
   scale_fill_viridis() + 
@@ -107,8 +106,8 @@ tbl_df(G_unrolled) %>%
 # confirm that the basis functions are independent of the covariates
 tbl_df(G_unrolled) %>%
   bind_cols(d) %>%
-  select(starts_with("V"), choval, cinc, cplumb) %>%
-  pairs
+  select(starts_with("V"), choval, cplumb) %>%
+  cor
 
 # construct the propagator matrix
 Bt <- array(dim = c(r, dim(X)[2] + r, Nt))
@@ -135,7 +134,7 @@ for (i in 2:Nt) {
 }
 
 # coef for fixed effects
-beta <- rnorm(dim(X)[2])
+(beta <- rnorm(dim(X)[2]))
 
 # process model
 Y <- matrix(nrow = dim(X)[1], ncol = Nt)
@@ -143,5 +142,34 @@ for (i in 1:Nt) {
   Y[, i] <- X[, , i] %*% beta + S_X[, , i] %*% eta[i, ]
 }
 
+# visualize latent process
+Y %>%
+  tbl_df %>%
+  gather(year, y) %>%
+  bind_cols(d) %>%
+  mutate(id = POLYID) %>%
+  right_join(columbus_map) %>%
+  ggplot(aes(x = long, y = lat, group = id, fill = y)) + 
+  geom_polygon() + 
+  facet_grid(l ~ t) + 
+  scale_fill_viridis() + 
+  coord_equal() + 
+  theme_minimal()
+
+
+
 # observation model
 Z <- Y + matrix(rnorm(dim(X)[1] * Nt, sd = .2), ncol = Nt)
+
+
+Z %>%
+  tbl_df %>%
+  gather(year, z) %>%
+  bind_cols(d) %>%
+  mutate(id = POLYID) %>%
+  right_join(columbus_map) %>%
+  ggplot(aes(x = long, y = lat, group = id, fill = z)) + 
+  geom_polygon() + 
+  facet_grid(l ~ t) + 
+  scale_fill_viridis() + 
+  coord_equal()
