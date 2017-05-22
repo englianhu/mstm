@@ -37,9 +37,15 @@ transformed parameters {
 model {
   beta ~ normal(0, 1);
   to_vector(etaR) ~ normal(0, 1);
-  L_eta ~ lkj_corr_cholesky(5);
+  L_eta ~ lkj_corr_cholesky(2);
   sigma_0 ~ normal(0, 1);
   sigma_eta ~ normal(0, 1);
   sigma_z ~ normal(0, 1);
   for (t in 1:T) Z[t] ~ normal(mu[t], sigma_z);
+}
+
+generated quantities {
+  matrix[r, r] R_eta;
+  
+  R_eta = multiply_lower_tri_self_transpose(L_eta);
 }

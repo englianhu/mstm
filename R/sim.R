@@ -1,5 +1,9 @@
 
 # Simulating multivariate aerial spatiotemporal data ----------------------
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
 library(clusterGeneration)
 library(spdep)
 library(tidyverse)
@@ -32,9 +36,9 @@ d <- left_join(mvdf, columbus_df) %>%
 
 # Make some temporally varying covariates
 d <- d %>%
-  mutate(hoval = HOVAL * sqrt(t) + rnorm(n(), 0, 5), 
-         inc = INC * -t^2 + rnorm(n(), 0, 5), 
-         plumb = PLUMB * .3 * t + rnorm(n(), 0, 5), 
+  mutate(hoval = HOVAL, 
+         inc = INC, 
+         plumb = PLUMB, 
          choval = c(scale(hoval)), 
          cinc = c(scale(inc)), 
          cplumb = c(scale(plumb)))
@@ -63,9 +67,9 @@ columbus_map %>%
   scale_fill_viridis()
 
 # Now put together design matrices for each timestep
-X <- array(dim = c(nrow(d) / Nt, 3, Nt))
+X <- array(dim = c(Nt, nrow(d) / Nt, 3))
 for (i in 1:Nt) {
-  X[, , i] <- d %>%
+  X[i, , ] <- d %>%
     filter(t == i) %>%
     model.matrix(~ 1 + cplumb + choval, data = .)
 }
@@ -77,21 +81,21 @@ image(A_t)
 
 # compute multivariate basis functions
 r <- 5
-S_X <- array(dim = c(nrow(X[,,1]), r, Nt))
+S_X <- array(dim = c(Nt, nrow(d) / Nt, r))
 for (i in 1:Nt) {
-  G <- (diag(nrow(X[, , 1])) - 
-          X[, , i] %*% solve(t(X[, , i]) %*% X[, , i]) %*% t(X[, , i])) %*%
+  G <- (diag(nrow(X[1, , ])) - 
+          X[i, , ] %*% solve(t(X[i, , ]) %*% X[i, , ]) %*% t(X[i, , ])) %*%
     A_t %*%
-    (diag(nrow(X[, , 1])) - 
-       X[, , i] %*% solve(t(X[, , i]) %*% X[, , i]) %*% t(X[, , i]))
+    (diag(nrow(X[1, , ])) - 
+       X[i, , ] %*% solve(t(X[i, , ]) %*% X[i, , ]) %*% t(X[i, , ]))
   eG <- eigen(G)
   basis_vectors <- eG$vectors
-  S_X[, , i] <- basis_vectors[, 1:r]
+  S_X[i, , ] <- basis_vectors[, 1:r]
 }
 
 # visualize multivariate basis functions
-G_unrolled <- S_X[, , 1]
-for (i in 2:Nt) G_unrolled = rbind(G_unrolled, S_X[, , i])
+G_unrolled <- S_X[1, , ]
+for (i in 2:Nt) G_unrolled = rbind(G_unrolled, S_X[i, , ])
 
 tbl_df(G_unrolled) %>%
   bind_cols(d) %>%
@@ -110,17 +114,17 @@ tbl_df(G_unrolled) %>%
   cor
 
 # construct the propagator matrix
-Bt <- array(dim = c(r, dim(X)[2] + r, Nt))
-Mt <- array(dim = c(r, r, Nt))
+Bt <- array(dim = c(r, dim(X)[3] + r, Nt))
+Mt <- array(dim = c(Nt, r, r))
 for (i in 1:Nt) {
-  Bt[, , i] <- cbind(t(S_X[, , i]) %*% X[, , i], diag(r))
+  Bt[, , i] <- cbind(t(S_X[i, , ]) %*% X[i, , ], diag(r))
   G_B <- (diag(r) - 
             Bt[, , i] %*% MASS::ginv(t(Bt[, , i]) %*% Bt[, , i]) %*% t(Bt[, , i])) %*%
     diag(r) %*% 
     (diag(r) - 
        Bt[, , i] %*% MASS::ginv(t(Bt[, , i]) %*% Bt[, , i]) %*% t(Bt[, , i]))
   eGB <- eigen(G_B)
-  Mt[, , i] <- eGB$vectors[, 1:r]
+  Mt[i, , ] <- eGB$vectors[, 1:r]
 }
 
 # construct the basis function coefficients
@@ -130,16 +134,16 @@ LR_eta <- t(chol(R_eta))
 sigma_eta <- .1
 eta[1, ] <- rnorm(r)
 for (i in 2:Nt) {
-  eta[i, ] <- Mt[, , i] %*% eta[i - 1, ] + sigma_eta * c(LR_eta %*% rnorm(r))
+  eta[i, ] <- Mt[i, , ] %*% eta[i - 1, ] + sigma_eta * c(LR_eta %*% rnorm(r))
 }
 
 # coef for fixed effects
-(beta <- rnorm(dim(X)[2]))
+(beta <- rnorm(dim(X)[3]))
 
 # process model
-Y <- matrix(nrow = dim(X)[1], ncol = Nt)
+Y <- matrix(nrow = dim(X)[2], ncol = Nt)
 for (i in 1:Nt) {
-  Y[, i] <- X[, , i] %*% beta + S_X[, , i] %*% eta[i, ]
+  Y[, i] <- X[i, , ] %*% beta + S_X[i, , ] %*% eta[i, ]
 }
 
 # visualize latent process
@@ -159,7 +163,7 @@ Y %>%
 
 
 # observation model
-Z <- Y + matrix(rnorm(dim(X)[1] * Nt, sd = .2), ncol = Nt)
+Z <- Y + matrix(rnorm(dim(X)[2] * Nt, sd = .2), ncol = Nt)
 
 
 Z %>%
@@ -173,3 +177,25 @@ Z %>%
   facet_grid(l ~ t) + 
   scale_fill_viridis() + 
   coord_equal()
+
+
+
+stan_d <- list(n = nrow(columbus_df), 
+               T = Nt, 
+               L = L, 
+               p = dim(X)[3], 
+               r = r, 
+               S = S_X, 
+               M = Mt, 
+               Z = Z)
+
+m_init <- stan_model("stan/mstm.stan")
+
+m_fit <- sampling(m_init, data = stan_d)
+
+traceplot(m_fit)
+beta
+
+plot(m_fit, pars = "eta")
+plot(m_fit, pars = "sigma_eta")
+plot(m_fit, pars = "R_eta")
