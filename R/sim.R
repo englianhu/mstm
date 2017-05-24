@@ -1,5 +1,6 @@
 
 # Simulating multivariate aerial spatiotemporal data ----------------------
+library(reshape2)
 library(rstan)
 rstan_options(auto_write = TRUE)
 options(mc.cores = parallel::detectCores())
@@ -13,7 +14,7 @@ library(viridis)
 L <- 2
 
 # Number of timesteps
-Nt <- 10
+Nt <- 20
 
 example(columbus)
 coords <- coordinates(columbus)
@@ -39,12 +40,18 @@ d <- d %>%
   mutate(hoval = HOVAL, 
          inc = INC, 
          plumb = PLUMB, 
-         choval = c(scale(hoval)), 
-         cinc = c(scale(inc)), 
-         cplumb = c(scale(plumb)))
+         choval = c(scale(scale(hoval) * scale(t)^2 + plogis(t))), 
+         cinc = c(scale(inc * -t + rnorm(n()))), 
+         cplumb = c(scale(scale(plumb) * plogis(t) + rnorm(n(), sd = .1))))
 
 pairs(d[, c("choval", "cplumb")])
 
+d %>%
+  select(POLYID, starts_with("c", ignore.case = FALSE), t) %>%
+  gather(var, value, -POLYID, -t) %>%
+  ggplot(aes(t, value, group = POLYID)) + 
+  facet_wrap(~var) + 
+  geom_line()
 
 W <- as.matrix(nb2mat(xx, style = "B"))
 
@@ -101,10 +108,10 @@ tbl_df(G_unrolled) %>%
   bind_cols(d) %>%
   mutate(id = POLYID) %>%
   right_join(columbus_map) %>%
-  ggplot(aes(x = long, y = lat, group = id, fill = V1)) + 
-  geom_polygon() + 
-  facet_grid(l ~ t) + 
-  scale_fill_viridis() + 
+  ggplot(aes(x = long, y = lat, group = id, fill = V1)) +
+  geom_polygon() +
+  facet_grid(l ~ t) +
+  scale_fill_viridis() +
   coord_equal()
 
 # confirm that the basis functions are independent of the covariates
@@ -131,8 +138,9 @@ for (i in 1:Nt) {
 eta <- matrix(nrow = Nt, ncol = r)
 R_eta <- rcorrmatrix(r, alphad = 5)
 LR_eta <- t(chol(R_eta))
-sigma_eta <- .1
-eta[1, ] <- rnorm(r)
+sigma_eta <- 2
+sigma_0 <- 4
+eta[1, ] <- sigma_0 * c(LR_eta %*% rnorm(r))
 for (i in 2:Nt) {
   eta[i, ] <- Mt[i, , ] %*% eta[i - 1, ] + sigma_eta * c(LR_eta %*% rnorm(r))
 }
@@ -153,11 +161,11 @@ Y %>%
   bind_cols(d) %>%
   mutate(id = POLYID) %>%
   right_join(columbus_map) %>%
-  ggplot(aes(x = long, y = lat, group = id, fill = y)) + 
-  geom_polygon() + 
-  facet_grid(l ~ t) + 
-  scale_fill_viridis() + 
-  coord_equal() + 
+  ggplot(aes(x = long, y = lat, group = id, fill = y)) +
+  geom_polygon() +
+  facet_grid(l ~ t) +
+  scale_fill_viridis() +
+  coord_equal() +
   theme_minimal()
 
 
@@ -172,10 +180,10 @@ Z %>%
   bind_cols(d) %>%
   mutate(id = POLYID) %>%
   right_join(columbus_map) %>%
-  ggplot(aes(x = long, y = lat, group = id, fill = z)) + 
-  geom_polygon() + 
-  facet_grid(l ~ t) + 
-  scale_fill_viridis() + 
+  ggplot(aes(x = long, y = lat, group = id, fill = z)) +
+  geom_polygon() +
+  facet_grid(l ~ t) +
+  scale_fill_viridis() +
   coord_equal()
 
 
@@ -193,9 +201,69 @@ m_init <- stan_model("stan/mstm.stan")
 
 m_fit <- sampling(m_init, data = stan_d)
 
+
 traceplot(m_fit)
 beta
 
-plot(m_fit, pars = "eta")
-plot(m_fit, pars = "sigma_eta")
+
+post <- rstan::extract(m_fit)
+
+eta_df <- eta %>%
+  reshape2::melt(varnames = c("year", "basis_dim"), 
+                 value.name = "true_eta")
+
+eta_df %>%
+  ggplot(aes(year, true_eta, color = factor(basis_dim))) + 
+  geom_line()
+
+
+post$eta %>%
+  reshape2::melt(varnames = c("iter", "basis_dim", "year")) %>%
+  tbl_df %>%
+  group_by(basis_dim, year) %>%
+  summarize(med = median(value), 
+            lo = quantile(value, .025), 
+            hi = quantile(value, .975)) %>%
+  ungroup() %>%
+  full_join(eta_df) %>% 
+  ggplot(aes(true_eta, med)) + 
+  geom_point() + 
+  geom_segment(aes(xend = true_eta, y = lo, yend = hi)) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") + 
+  xlab("True basis coefficient") + 
+  ylab("Estimated basis coefficient")
+
+
+
+plot(m_fit, pars = "sigma_eta") + 
+  geom_vline(xintercept = sigma_eta, linetype = "dashed")
+
+plot(m_fit, pars = "sigma_0") + 
+  geom_vline(xintercept = 1, linetype = "dashed")
+
+
+
 plot(m_fit, pars = "R_eta")
+R_eta
+
+
+R_eta_df <- R_eta %>%
+  reshape2::melt(varnames = c("row", "col"), value.name = "trueR")
+
+post$R_eta %>%
+  reshape2::melt(varnames = c("iter", "row", "col")) %>%
+  tbl_df %>%
+  group_by(row, col) %>%
+  summarize(med = median(value), 
+            lo = quantile(value, .025), 
+            hi = quantile(value, .975)) %>%
+  ungroup() %>%
+  full_join(R_eta_df) %>% 
+  ggplot(aes(trueR, med)) + 
+  geom_point() + 
+  geom_segment(aes(xend = trueR, y = lo, yend = hi)) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") + 
+  xlab("True basis correlation") + 
+  ylab("Estimated basis correlation")
+
+
