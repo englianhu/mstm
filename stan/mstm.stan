@@ -14,7 +14,7 @@ parameters {
   vector[p] beta;
   matrix[r, T] etaR;
   cholesky_factor_corr[r] L_eta;
-  vector<lower = 0>[r] sigma_0;
+  real<lower = 0> sigma_0;
   vector<lower = 0>[r] sigma_eta;
   real<lower = 0> sigma_z;
 }
@@ -23,7 +23,7 @@ transformed parameters {
   matrix[r, T] eta;
   matrix[n * L, T] mu;
   
-  eta[, 1] = diag_pre_multiply(sigma_0, L_eta) *  etaR[, 1];
+  eta[, 1] = diag_pre_multiply(rep_vector(sigma_0, r), L_eta) *  etaR[, 1];
   for (t in 2:T) {
     eta[, t] = M[t] * eta[, t - 1] + 
     diag_pre_multiply(sigma_eta, L_eta) *  etaR[, t];
@@ -38,9 +38,9 @@ model {
   beta ~ normal(0, 1);
   to_vector(etaR) ~ normal(0, 1);
   L_eta ~ lkj_corr_cholesky(2);
-  sigma_0 ~ normal(0, 1);
-  sigma_eta ~ normal(0, 1);
-  sigma_z ~ normal(0, 1);
+  sigma_0 ~ normal(0, 3);
+  sigma_eta ~ normal(0, 3);
+  sigma_z ~ normal(0, 3);
   for (t in 1:T) Z[t] ~ normal(mu[t], sigma_z);
 }
 

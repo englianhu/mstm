@@ -1,5 +1,10 @@
 
 # Simulating multivariate aerial spatiotemporal data ----------------------
+# based on Bradley, Holan, and Wikle 2015
+# Multivariate spatio-temporal models for high-dimensional areal data with 
+#   application to Longitudinal Employer-Household Dynamics
+# https://arxiv.org/abs/1503.00982
+
 library(reshape2)
 library(rstan)
 rstan_options(auto_write = TRUE)
@@ -16,6 +21,7 @@ L <- 2
 # Number of timesteps
 Nt <- 20
 
+# Load "Columbus" shapefile and compute neighbors
 example(columbus)
 coords <- coordinates(columbus)
 xx <- poly2nb(columbus)
@@ -44,8 +50,6 @@ d <- d %>%
          cinc = c(scale(inc * -t + rnorm(n()))), 
          cplumb = c(scale(scale(plumb) * plogis(t) + rnorm(n(), sd = .1))))
 
-pairs(d[, c("choval", "cplumb")])
-
 d %>%
   select(POLYID, starts_with("c", ignore.case = FALSE), t) %>%
   gather(var, value, -POLYID, -t) %>%
@@ -71,14 +75,15 @@ columbus_map %>%
   mutate(zval = x[id]) %>%
   ggplot(aes(x = long, y = lat, group = group, fill = zval)) + 
   geom_polygon() + 
-  scale_fill_viridis()
+  scale_fill_viridis("CAR random effect") +
+  coord_equal()
 
 # Now put together design matrices for each timestep
-X <- array(dim = c(Nt, nrow(d) / Nt, 3))
+X <- array(dim = c(Nt, nrow(d) / Nt, 2))
 for (i in 1:Nt) {
   X[i, , ] <- d %>%
     filter(t == i) %>%
-    model.matrix(~ 1 + cplumb + choval, data = .)
+    model.matrix(~ 1 + cinc, data = .)
 }
 
 # Make block diagonal adjacency matrix
@@ -104,6 +109,7 @@ for (i in 1:Nt) {
 G_unrolled <- S_X[1, , ]
 for (i in 2:Nt) G_unrolled = rbind(G_unrolled, S_X[i, , ])
 
+# V1 is the first basis vector, V2 the second, etc.
 tbl_df(G_unrolled) %>%
   bind_cols(d) %>%
   mutate(id = POLYID) %>%
@@ -117,8 +123,9 @@ tbl_df(G_unrolled) %>%
 # confirm that the basis functions are independent of the covariates
 tbl_df(G_unrolled) %>%
   bind_cols(d) %>%
-  select(starts_with("V"), choval, cplumb) %>%
-  cor
+  select(starts_with("V"), cinc) %>%
+  cor %>%
+  image
 
 # construct the propagator matrix
 Bt <- array(dim = c(r, dim(X)[3] + r, Nt))
@@ -134,9 +141,9 @@ for (i in 1:Nt) {
   Mt[i, , ] <- eGB$vectors[, 1:r]
 }
 
-# construct the basis function coefficients
+# simulate basis function coefficients
 eta <- matrix(nrow = Nt, ncol = r)
-R_eta <- rcorrmatrix(r, alphad = 5)
+R_eta <- rcorrmatrix(r, alphad = 1)
 LR_eta <- t(chol(R_eta))
 sigma_eta <- 2
 sigma_0 <- 4
@@ -145,7 +152,7 @@ for (i in 2:Nt) {
   eta[i, ] <- Mt[i, , ] %*% eta[i - 1, ] + sigma_eta * c(LR_eta %*% rnorm(r))
 }
 
-# coef for fixed effects
+# simulate coef for fixed effects
 (beta <- rnorm(dim(X)[3]))
 
 # process model
@@ -170,9 +177,8 @@ Y %>%
 
 
 
-# observation model
+# observation model (process + noise)
 Z <- Y + matrix(rnorm(dim(X)[2] * Nt, sd = .2), ncol = Nt)
-
 
 Z %>%
   tbl_df %>%
@@ -188,6 +194,8 @@ Z %>%
 
 
 
+# Fit model in Stan, evaluate parameter recovery --------------------------
+
 stan_d <- list(n = nrow(columbus_df), 
                T = Nt, 
                L = L, 
@@ -201,20 +209,18 @@ m_init <- stan_model("stan/mstm.stan")
 
 m_fit <- sampling(m_init, data = stan_d)
 
-
+# evaluate convergence and check recovery of fixed effects
 traceplot(m_fit)
 beta
 
 
 post <- rstan::extract(m_fit)
 
+
+# Evaluate recovery of spatiotemporal basis coefficients
 eta_df <- eta %>%
   reshape2::melt(varnames = c("year", "basis_dim"), 
                  value.name = "true_eta")
-
-eta_df %>%
-  ggplot(aes(year, true_eta, color = factor(basis_dim))) + 
-  geom_line()
 
 
 post$eta %>%
@@ -234,18 +240,12 @@ post$eta %>%
   ylab("Estimated basis coefficient")
 
 
-
+# Evaluate recovery of basis coefficient hypoerparameters
 plot(m_fit, pars = "sigma_eta") + 
   geom_vline(xintercept = sigma_eta, linetype = "dashed")
-
 plot(m_fit, pars = "sigma_0") + 
-  geom_vline(xintercept = 1, linetype = "dashed")
-
-
-
-plot(m_fit, pars = "R_eta")
-R_eta
-
+  geom_vline(xintercept = sigma_0, linetype = "dashed") + 
+  xlim(0, 5)
 
 R_eta_df <- R_eta %>%
   reshape2::melt(varnames = c("row", "col"), value.name = "trueR")
@@ -265,5 +265,3 @@ post$R_eta %>%
   geom_abline(slope = 1, intercept = 0, linetype = "dashed") + 
   xlab("True basis correlation") + 
   ylab("Estimated basis correlation")
-
-
